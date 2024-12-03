@@ -1,6 +1,12 @@
 package DBD_env_unification;
 
 import java.sql.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+import java.sql.Date;
+import java.time.LocalDate;
+import java.time.temporal.ChronoUnit;
 
 public class User {
     private String user_id;
@@ -8,8 +14,12 @@ public class User {
     private String email;
     private String department;
     private String status;
+    private List<Integer> loanIds = new ArrayList<Integer>();   // 대출 중인 자료 list
+    private List<Integer> overdueIds = new ArrayList<Integer>();    // 연체 자료 list
+    private Connection con;
 
     public User(String user_id, Connection con){
+        this.con = con;
         String query =
                 "select User_ID, NAME, Mail, Department, Status from user where User_ID = ?";
         try (PreparedStatement preparedStatement = con.prepareStatement(query))
@@ -26,18 +36,585 @@ public class User {
         } catch (SQLException e) {
             System.out.println("Failed to select : " + e.getMessage());
         }
+        initLoanList(con);
+        initExtendList(con);
     }
 
-    public void printUser(){
-        System.out.println("사용자 정보");
-        System.out.println("ID: "+user_id);
-        System.out.println("name: "+name);
-        System.out.println("email: "+email);
-        System.out.println("dep: "+department);
-        System.out.println("status: "+status);
+    public void borrowBook(int book_id, Connection con) {
+
+        String checkStatusQuery = "SELECT Book_status FROM book WHERE Data_ID = ?";
+        String insertLoanQuery = "INSERT INTO loan (User_ID, Data_ID, Start_time, End_time) VALUES (?, ?, NOW(), DATE_ADD(NOW(), INTERVAL 14 DAY))";
+        if(loanIds.size()>=15){
+            System.out.println("대출 가능한 자료 개수를 초과하였습니다. 대출이 불가능합니다.");
+            return;
+        }
+
+        // 1. 도서 상태 확인
+        try (PreparedStatement checkStatusStmt = con.prepareStatement(checkStatusQuery)) {
+            checkStatusStmt.setInt(1, book_id);
+            ResultSet resultSet = checkStatusStmt.executeQuery();
+            if (resultSet.next()) {
+                String status = resultSet.getString("Book_status");
+                if (!"대출 가능".equals(status)) {
+                    System.out.println("해당 도서는 현재 대출이 불가능합니다.");
+                    return;
+                }
+            } else {
+                System.out.println("해당 도서는 존재하지 않습니다.");
+                return;
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+
+        // 2. 대출 처리
+        try (PreparedStatement insertLoanStmt = con.prepareStatement(insertLoanQuery)) {
+            con.setAutoCommit(false);
+
+            // 대출 기록 추가
+            insertLoanStmt.setString(1, this.user_id);
+            insertLoanStmt.setInt(2, book_id);
+            insertLoanStmt.executeUpdate();
+
+            con.commit();
+            System.out.println("도서가 성공적으로 대출되었습니다.");
+
+            String selectQuery = "SELECT loan_ID FROM loan WHERE User_ID = ? ORDER BY Start_time DESC LIMIT 1";
+            PreparedStatement selectStmt = con.prepareStatement(selectQuery);
+            selectStmt.setString(1, this.user_id);
+            ResultSet rs1 = selectStmt.executeQuery();
+
+            if (rs1.next()) {
+                int loanID = rs1.getInt("loan_ID");
+                loanIds.add(loanID);
+            }
+        } catch (SQLException e) {
+            try {
+                con.rollback();
+                System.out.println("대출 처리 중 오류 발생, 롤백 수행");
+            } catch (SQLException rollbackEx) {
+                rollbackEx.printStackTrace();
+            }
+            e.printStackTrace();
+        } finally {
+            try {
+                con.setAutoCommit(true);
+            } catch (SQLException ex) {
+                ex.printStackTrace();
+            }
+        }
     }
 
+    // 반납하기
+    public void returnBook(int loan_id, Connection con) {
+        if(loanIds.size()<1){
+            System.out.println("대충 중인 자료가 존재하지 않습니다.");
+            return;
+        }
+
+        // 대출 중인지 확인
+        int i;
+        for(i = 0; i<loanIds.size(); i++){
+            if(loanIds.get(i) == loan_id)
+                break;
+        }
+        if(i==loanIds.size()){
+            System.out.println("이미 반납이 완료되었습니다.");
+            return;
+        }
+
+        String insertReturnQuery = "INSERT INTO `return` (Loan_ID, End_time) VALUES (?, NOW())";
+        try (PreparedStatement insertReturnStmt = con.prepareStatement(insertReturnQuery)) {
+            con.setAutoCommit(false);
+
+            // 대출 기록 추가
+            insertReturnStmt.setInt(1, loan_id);
+            insertReturnStmt.executeUpdate();
+
+            con.commit();
+            System.out.println("도서가 성공적으로 반납되었습니다.");
+
+            for (i = 0; i < loanIds.size(); i++) {
+                if(loanIds.get(i)==loan_id){
+                    loanIds.remove(i);
+                    break;
+                }
+            }
+
+        } catch (SQLException e) {
+            try {
+                con.rollback();
+                System.out.println("반납 처리 중 오류 발생, 롤백 수행");
+            } catch (SQLException rollbackEx) {
+                rollbackEx.printStackTrace();
+            }
+            e.printStackTrace();
+        } finally {
+            try {
+                con.setAutoCommit(true);
+            } catch (SQLException ex) {
+                ex.printStackTrace();
+            }
+        }
+    }
+
+    // 연장하기
+    public void ExtendBook(int loan_id, Connection con) {
+        String checksQuery = "SELECT Start_time FROM overdue WHERE Overdue_ID = ?";
+        if(loanIds.size()<1){
+            System.out.println("대충 중인 자료가 존재하지 않습니다.");
+            return;
+        }
+
+        // 대출 중인지 확인
+        int i;
+        for(i = 0; i<loanIds.size(); i++){
+            if(loanIds.get(i) == loan_id)
+                break;
+        }
+        if(i==loanIds.size()){
+            System.out.println("이미 반납이 완료되었습니다.");
+            return;
+        }
+
+        // 1. 연장 가능한지 -> 오늘 날짜가 반납일로부터 3일전이면 연장 가능 -- 해당 코드 삭제 시 연장 확인 가능
+        try (PreparedStatement checkStmt = con.prepareStatement(checksQuery)) {
+            checkStmt.setInt(1, loan_id);
+            ResultSet resultSet = checkStmt.executeQuery();
+            if (resultSet.next()) {
+                Date sqlDate = resultSet.getDate("Start_time"); // 예제 날짜 (YYYY-MM-DD)
+                LocalDate today = LocalDate.now();
+                LocalDate targetDate = sqlDate.toLocalDate();
+                long daysDifference = ChronoUnit.DAYS.between(today, targetDate);
+                if (daysDifference > 3) {
+                    System.out.println("반납 예정일 3일전부터 연장이 가능합니다.");
+                    return;
+                } else if (daysDifference < 0) {
+                    System.out.println("이미 반납 예정일이 지났습니다.");
+                    return;
+                }
+            } else {
+                return;
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+
+
+        String insertExtendQuery = "INSERT INTO `extend` (Extend_ID, Extend_time, New_End_time) VALUES (?, NOW(), DATE_ADD((SELECT End_time FROM loan WHERE Loan_ID = ?), INTERVAL 7 DAY))";
+        try (PreparedStatement insertExtendStmt = con.prepareStatement(insertExtendQuery)) {
+            con.setAutoCommit(false);
+
+            // 대출 기록 추가
+            insertExtendStmt.setInt(1, loan_id);
+            insertExtendStmt.setInt(2, loan_id);
+            insertExtendStmt.executeUpdate();
+
+            con.commit();
+            System.out.println("도서의 반납일자가 성공적으로 연장되었습니다.");
+
+        } catch (SQLException e) {
+            try {
+                con.rollback();
+                System.out.println("연장 처리 중 오류 발생, 롤백 수행");
+            } catch (SQLException rollbackEx) {
+                rollbackEx.printStackTrace();
+            }
+            e.printStackTrace();
+        } finally {
+            try {
+                con.setAutoCommit(true);
+            } catch (SQLException ex) {
+                ex.printStackTrace();
+            }
+        }
+    }
+
+
+    public void deleteUser(Connection conn) {
+        Scanner scanner = new Scanner(System.in);
+
+        // 입력받기
+        System.out.print("사용자 ID: ");
+        String userId = scanner.nextLine();
+
+        System.out.print("비밀번호: ");
+        String password = scanner.nextLine();
+
+        try {
+            // 사용자 ID와 비밀번호 확인
+            if (!isUserCredentialsValid(conn, user_id, password)) {
+                System.out.println("잘못된 사용자 ID 또는 비밀번호입니다.");
+                return;
+            }
+
+            // DELETE 쿼리 작성
+            String sql = "DELETE FROM user WHERE User_ID = ?";
+            try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
+                pstmt.setString(1, userId);
+
+                // 레코드 삭제
+                int rows = pstmt.executeUpdate();
+                if (rows > 0) {
+                    System.out.println("회원 탈퇴가 완료되었습니다.");
+                } else {
+                    System.out.println("회원 탈퇴에 실패했습니다.");
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 대출 현황 리스트 만들기
+    public void initLoanList(Connection con) {
+        // 대출 중인 도서의 Loan_ID를 조회하기 위한 쿼리
+        String checkLoanQuery = "SELECT Loan_ID FROM loan WHERE User_ID = ? ";
+        String checkReturnQuery = "SELECT Loan_ID FROM `return` WHERE Loan_ID = ? ";
+
+        // 대출 중인 Loan_ID를 저장할 리스트
+
+        try (PreparedStatement checkLoanStmt = con.prepareStatement(checkLoanQuery)) {
+            checkLoanStmt.setString(1, user_id);
+            ResultSet ln_rs = checkLoanStmt.executeQuery();
+
+            // 결과에서 Loan_ID를 가져와 ArrayList에 저장
+            while (ln_rs.next()) {
+                int loan_id = ln_rs.getInt("Loan_ID");
+                try (PreparedStatement checkReturnStmt = con.prepareStatement(checkReturnQuery)) {
+                    checkReturnStmt.setInt(1, loan_id);
+                    ResultSet rt_rs = checkReturnStmt.executeQuery();
+                    if (!rt_rs.next()){
+                        loanIds.add(loan_id); // Loan_ID를 ArrayList에 추가
+                    }
+                } catch (SQLException e1) {
+                    e1.printStackTrace();
+                }
+            }
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 대출 현황 출력하기
+    public void printLoanList(Connection con) {
+        System.out.println("대출 현황");
+        for (int i = 0; i < loanIds.size(); i++) {
+            System.out.println("<"+(i+1)+">");
+            String query =
+                    "select Loan_ID, Start_time, End_time, Data_ID from loan where Loan_ID = ?";
+            String query1 =
+                    "select Title, Author from data where Data_ID = ?";
+
+            String query2 =
+                    "select Start_time from overdue where Overdue_ID = ?";
+
+            try (PreparedStatement preparedStatement = con.prepareStatement(query);
+                 PreparedStatement preparedStatement1 = con.prepareStatement(query1);
+                 PreparedStatement preparedStatement2 = con.prepareStatement(query2))
+            {
+                preparedStatement.setInt(1, loanIds.get(i));  // user_id로 쿼리 실행
+                ResultSet rs = preparedStatement.executeQuery();
+
+                if (rs.next()) {
+
+                    System.out.println("대출 ID: " + rs.getInt("Loan_ID"));
+                    System.out.println("대출일: " + rs.getDate("Start_time"));
+
+                    preparedStatement2.setInt(1, rs.getInt("Loan_ID"));  // user_id로 쿼리 실행
+                    ResultSet rs2 = preparedStatement2.executeQuery();
+
+                    if (rs2.next()) {
+                        System.out.println("반납 예정일: " + rs2.getDate("Start_time"));
+                    }
+
+                    System.out.println("대출 자료");
+                    System.out.println("자료 ID: " + rs.getInt("Data_ID"));
+
+                    preparedStatement1.setInt(1, rs.getInt("Data_ID"));  // user_id로 쿼리 실행
+                    ResultSet rs1 = preparedStatement1.executeQuery();
+
+                    if (rs1.next()) {
+                        System.out.println("제목: " + rs1.getString("Title"));
+                        System.out.println("작가: " + rs1.getString("Author"));
+                    }
+                }
+
+            } catch (SQLException e) {
+                System.out.println("Failed to select : " + e.getMessage());
+            }
+        }
+    }
+
+
+    // 연체 리스트 초기화
+    public void initExtendList(Connection con) {
+        overdueIds = new ArrayList<>();
+        String query = "SELECT Overdue_ID FROM overdue WHERE End_time IS NULL AND Start_time < NOW()";
+        try (PreparedStatement pstmt = con.prepareStatement(query))
+        {
+            ResultSet rs = pstmt.executeQuery();
+            while (rs.next()) {
+                int overdueId = rs.getInt("Overdue_ID");
+                overdueIds.add(overdueId);
+
+                String updateStatusQuery = "UPDATE overdue SET Status = 1 WHERE Overdue_ID = ?";
+                try (PreparedStatement updateStmt = con.prepareStatement(updateStatusQuery)) {
+                    updateStmt.setInt(1, overdueId);
+                    updateStmt.executeUpdate();
+                }
+            }
+        }catch(SQLException e){
+            e.printStackTrace();
+        }
+    }
+
+
+
+    // 연체 자료 print 함수
+    public void printOverdueList(Connection con) {
+        if (overdueIds.isEmpty()) {
+            System.out.println("연체된 자료가 없습니다.");
+        } else {
+            System.out.println("연체 자료 목록:");
+            for (int i = 0; i < overdueIds.size(); i++) {
+                System.out.println("<"+(i+1)+">");
+                String query =
+                        "select Loan_ID, Start_time, End_time, Data_ID from loan where Loan_ID = ?";
+                String query1 =
+                        "select Title, Author from data where Data_ID = ?";
+
+                String query2 =
+                        "select Start_time from overdue where Overdue_ID = ?";
+
+                try (PreparedStatement preparedStatement = con.prepareStatement(query);
+                     PreparedStatement preparedStatement1 = con.prepareStatement(query1);
+                     PreparedStatement preparedStatement2 = con.prepareStatement(query2))
+                {
+                    preparedStatement.setInt(1, overdueIds.get(i));  // user_id로 쿼리 실행
+                    ResultSet rs = preparedStatement.executeQuery();
+
+                    if (rs.next()) {
+
+                        System.out.println("대출 ID: " + rs.getInt("Loan_ID"));
+                        System.out.println("대출 자료");
+                        System.out.println("자료 ID: " + rs.getInt("Data_ID"));
+
+                        preparedStatement1.setInt(1, rs.getInt("Data_ID"));  // user_id로 쿼리 실행
+                        ResultSet rs1 = preparedStatement1.executeQuery();
+
+                        if (rs1.next()) {
+                            System.out.println("제목: " + rs1.getString("Title"));
+                            System.out.println("작가: " + rs1.getString("Author"));
+                        }
+                        preparedStatement2.setInt(1, rs.getInt("Loan_ID"));  // user_id로 쿼리 실행
+                        ResultSet rs2 = preparedStatement2.executeQuery();
+
+                        if (rs2.next()) {
+                            System.out.println("반납 예정일: " + rs2.getDate("Start_time"));
+                        }
+                        System.out.println("연체료: " + calFine(overdueIds.get(i), con));
+                    }
+
+                } catch (SQLException e) {
+                    System.out.println("Failed to select : " + e.getMessage());
+                }
+            }
+        }
+    }
+
+    // 연체료 계산하기
+    public int calFine(int loan_id, Connection con) {
+        int fine = -1;
+        String fineQuery = "SELECT calculate_fine(Start_time, NOW()) AS Fine FROM overdue WHERE Overdue_ID = ?";
+        try (PreparedStatement pstmt = con.prepareStatement(fineQuery)) {
+            pstmt.setInt(1, loan_id);
+            ResultSet rs = pstmt.executeQuery();
+            if (rs.next()) {
+                fine = rs.getInt("Fine");
+            }
+        } catch (SQLException e) {
+            System.out.println("Failed to calculate : " + e.getMessage());
+        }
+        return fine;
+    }
+
+    // 연체료 결제하기
+
+    public void payFine(int loanId, Connection con){
+        if (!overdueIds.contains(loanId)) {
+            System.out.println("해당 대출 ID는 연체료 결제 대상이 아닙니다.");
+            return;
+        }
+        if(loanIds.contains(loanId))
+        {
+            System.out.println("반납 후 연체료 결제가 가능합니다.");
+            return;
+        }
+
+        int fine = calFine(loanId, con);
+
+        String updateFineQuery = "UPDATE overdue SET Fine = ?, Status = 1, End_time = NOW() WHERE Overdue_ID = ?";
+
+        try (PreparedStatement updateStmt = con.prepareStatement(updateFineQuery)) {
+            updateStmt.setInt(1, fine);
+            updateStmt.setInt(2, loanId);
+            updateStmt.executeUpdate();
+        }catch (SQLException e) {
+            System.out.println("Failed to calculate : " + e.getMessage());
+        }
+
+        System.out.println("연체료 " + fine + "원 결제 완료되었습니다.");
+        overdueIds.remove((Integer) loanId);
+    }
+
+    public boolean updateUser(String field, String new_value) {
+
+        try {
+
+            // UPDATE 쿼리 작성
+            String sql = "UPDATE user SET " + field + " = ? WHERE User_ID = ?";
+            try (PreparedStatement pstmt = con.prepareStatement(sql)) {
+                pstmt.setString(1, new_value);
+                pstmt.setString(2, user_id);
+
+                // 레코드 업데이트
+                int rows = pstmt.executeUpdate();
+                return rows > 0;
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    // 사용자 인증 함수 호출
+    public boolean isUserCredentialsValid(Connection conn,String userId, String password) {
+        String sql = "{? = CALL isUserCredentialsValid(?, ?)}"; // MySQL 함수 호출 구문
+        try (CallableStatement stmt = conn.prepareCall(sql)) {
+            // 첫 번째 인자는 반환 값이므로 등록
+            stmt.registerOutParameter(1, Types.BOOLEAN);
+            // 두 번째, 세 번째 인자는 입력 값
+            stmt.setString(2, userId);
+            stmt.setString(3, password);
+
+            // 함수 실행
+            stmt.execute();
+
+            // 반환된 값 확인
+            return stmt.getBoolean(1);
+        } catch (SQLException e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    public void addToStorage(Connection conn, String userId, int dataId, String folder) {
+        String checkSql = "SELECT isDataExists(?)"; // isDataExists 함수 호출
+        String addSql = "{CALL addToStorage(?, ?, ?)}"; // addToStorage 프로시저 호출
+
+        try (PreparedStatement checkStmt = conn.prepareStatement(checkSql)) {
+            // 데이터 존재 여부 확인
+            checkStmt.setInt(1, dataId);
+            try (ResultSet rs = checkStmt.executeQuery()) {
+                if (rs.next() && rs.getBoolean(1)) {
+                    // 데이터가 존재하면 addToStorage 호출
+                    try (CallableStatement addStmt = conn.prepareCall(addSql)) {
+                        addStmt.setString(1, userId);
+                        addStmt.setInt(2, dataId);
+                        addStmt.setString(3, folder);
+
+                        addStmt.execute();
+                        System.out.println("Data added to storage successfully.");
+                    }
+                } else {
+                    System.out.println("Data with ID " + dataId + " does not exist.");
+                }
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // 사용자 저장소를 가져오는 메서드
+    public List<String> showUsersStorage() {
+        String sql = "{CALL GetFilesByUserAndFolder(?)}"; // MySQL 함수 호출 구문
+        List<String> storageItems = new ArrayList<>();
+        String currentFolder = "";
+
+        try (CallableStatement stmt = con.prepareCall(sql)) {
+            stmt.setString(1, user_id);
+            ResultSet rs = stmt.executeQuery();
+
+            while (rs.next()) {
+                String storageID = Integer.toString(rs.getInt("Storage_ID"));
+                String title = rs.getString("Title");
+                String author = rs.getString("Author");
+                String type = rs.getString("Type");
+                String folder = rs.getString("Storage_folder");
+
+                // 폴더가 변경되었을 경우 새로운 폴더를 표시
+                if (!currentFolder.equals(folder)) {
+                    storageItems.add("-1");
+                    storageItems.add("== " + folder + " ==");
+                    currentFolder = folder;
+                }
+
+                // 도서 정보를 항목으로 추가
+                storageItems.add(storageID);
+                storageItems.add("Title: " + title + ", Author: " + author + ", Type: " + type);
+
+            }
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+
+        return storageItems;
+    }
+
+    public void deleteStorage(int storageId) {
+        String sql = "DELETE FROM storage WHERE Storage_ID = ?"; // MySQL 함수 호출 구문
+        try (CallableStatement stmt = con.prepareCall(sql)) {
+            stmt.setInt(1, storageId);
+            stmt.executeUpdate();
+
+        } catch (SQLException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getDepartment() {
+        return department;
+    }
+
+    public void setDepartment(String department) {
+        this.department = department;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
 }
-
-
-
