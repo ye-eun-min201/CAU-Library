@@ -15,9 +15,11 @@ public class User {
     private String status;
     private List<Integer> loanIds = new ArrayList<Integer>();   // 대출 중인 자료 list
     private List<Integer> overdueIds = new ArrayList<Integer>();    // 연체 자료 list
+    private Connection con;
 
 
     public User(String user_id, Connection con){
+        this.con = con;
         String query =
                 "select User_ID, NAME, Mail, Department, Status from user where User_ID = ?";
         try (PreparedStatement preparedStatement = con.prepareStatement(query))
@@ -47,16 +49,6 @@ public class User {
         }
         initLoanList(con);
         initExtendList(con);
-    }
-
-    public void printUser(Connection con){
-        System.out.println("사용자 정보");
-        System.out.println("ID: "+user_id);
-        System.out.println("name: "+name);
-        System.out.println("email: "+email);
-        System.out.println("dep: "+department);
-        System.out.println("status: "+status);
-        printLoanList(con);
     }
 
     public void borrowBook(int book_id, Connection con) {
@@ -252,7 +244,6 @@ public class User {
     }
 
 
-
     public void deleteUser(Connection conn) {
         Scanner scanner = new Scanner(System.in);
 
@@ -265,7 +256,9 @@ public class User {
 
         try {
             // 사용자 ID와 비밀번호 확인
-            if (!isUserCredentialsValid(conn, password)) {
+
+            if (!isUserCredentialsValid(conn, user_id, password)) {
+
                 System.out.println("잘못된 사용자 ID 또는 비밀번호입니다.");
                 return;
             }
@@ -287,6 +280,7 @@ public class User {
             e.printStackTrace();
         }
     }
+
   
   // 대출 현황 리스트 만들기
     public void initLoanList(Connection con) {
@@ -367,6 +361,7 @@ public class User {
                 System.out.println("Failed to select : " + e.getMessage());
             }
         }
+
     }
 
 
@@ -491,59 +486,34 @@ public class User {
         overdueIds.remove((Integer) loanId);
     }
 
-}
-
-    public void updateUser(Connection conn) {
-        Scanner scanner = new Scanner(System.in);
-
-        // 입력받기
-        System.out.print("사용자 ID: ");
-        String userId = scanner.nextLine();
-
-        System.out.print("비밀번호: ");
-        String password = scanner.nextLine();
+    public boolean updateUser(String field, String new_value) {
 
         try {
-            // 사용자 ID와 비밀번호 확인
-            if (!isUserCredentialsValid(conn,password)) {
-                System.out.println("잘못된 사용자 ID 또는 비밀번호입니다.");
-                return;
-            }
-
-            // 수정할 필드와 값 입력받기
-            System.out.print("수정할 필드명 (Name, Mail, Password, Department, Status 중 하나): ");
-            String field = scanner.nextLine();
-
-            System.out.print("새로운 값: ");
-            String newValue = scanner.nextLine();
 
             // UPDATE 쿼리 작성
             String sql = "UPDATE user SET " + field + " = ? WHERE User_ID = ?";
-            try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
-                pstmt.setString(1, newValue);
-                pstmt.setString(2, userId);
+            try (PreparedStatement pstmt = con.prepareStatement(sql)) {
+                pstmt.setString(1, new_value);
+                pstmt.setString(2, user_id);
 
                 // 레코드 업데이트
                 int rows = pstmt.executeUpdate();
-                if (rows > 0) {
-                    System.out.println("회원 정보가 성공적으로 수정되었습니다.");
-                } else {
-                    System.out.println("회원 정보 수정에 실패했습니다.");
-                }
+                return rows > 0;
             }
         } catch (SQLException e) {
             e.printStackTrace();
+            return false;
         }
     }
 
     // 사용자 인증 함수 호출
-    public boolean isUserCredentialsValid(Connection conn, String password) {
+    public boolean isUserCredentialsValid(Connection conn,String userId, String password) {
         String sql = "{? = CALL isUserCredentialsValid(?, ?)}"; // MySQL 함수 호출 구문
         try (CallableStatement stmt = conn.prepareCall(sql)) {
             // 첫 번째 인자는 반환 값이므로 등록
             stmt.registerOutParameter(1, Types.BOOLEAN);
             // 두 번째, 세 번째 인자는 입력 값
-            stmt.setString(2, user_id);
+            stmt.setString(2, userId);
             stmt.setString(3, password);
 
             // 함수 실행
@@ -557,7 +527,6 @@ public class User {
         }
     }
 
-    //개인 보관함에 추가
     public void addToStorage(Connection conn, String userId, int dataId, String folder) {
         String checkSql = "SELECT isDataExists(?)"; // isDataExists 함수 호출
         String addSql = "{CALL addToStorage(?, ?, ?)}"; // addToStorage 프로시저 호출
@@ -585,36 +554,45 @@ public class User {
         }
     }
 
-    //유저의 개인 보관함을 폴더별로 보여준다
-    public void showUsersStorage(Connection conn, String userId) {
-        String sql = "{CALL showUsersStorage(?)}"; // MySQL 함수 호출 구문
+    // 사용자 저장소를 가져오는 메서드
+    public List<String> showUsersStorage() {
+        String sql = "{CALL GetFilesByUserAndFolder(?)}"; // MySQL 함수 호출 구문
+        List<String> storageItems = new ArrayList<>();
         String currentFolder = "";
-        try (CallableStatement stmt = conn.prepareCall(sql)) {
-            stmt.setString(1, userId);
 
+        try (CallableStatement stmt = con.prepareCall(sql)) {
+            stmt.setString(1, user_id);
             ResultSet rs = stmt.executeQuery();
 
-            // 결과 출력
             while (rs.next()) {
+                String storageID = Integer.toString(rs.getInt("Storage_ID"));
                 String title = rs.getString("Title");
                 String author = rs.getString("Author");
-                String publisher = rs.getString("Publisher");
+                String type = rs.getString("Type");
                 String folder = rs.getString("Storage_folder");
-                if(!currentFolder.equals(folder)){
-                    System.out.println(folder);
+
+                // 폴더가 변경되었을 경우 새로운 폴더를 표시
+                if (!currentFolder.equals(folder)) {
+                    storageItems.add("-1");
+                    storageItems.add("== " + folder + " ==");
                     currentFolder = folder;
                 }
-                System.out.println("Title: " + title + ", Author: " + author + ", Publisher: " + publisher);
+
+                // 도서 정보를 항목으로 추가
+                storageItems.add(storageID);
+                storageItems.add("Title: " + title + ", Author: " + author + ", Type: " + type);
+
             }
         } catch (SQLException e) {
             e.printStackTrace();
         }
-    }
 
+        return storageItems;
+    }
     //개인 보관함에서 삭제
-    public void deleteStorage(Connection conn, int storageId) {
+    public void deleteStorage(int storageId) {
         String sql = "DELETE FROM storage WHERE Storage_ID = ?"; // MySQL 함수 호출 구문
-        try (CallableStatement stmt = conn.prepareCall(sql)) {
+        try (CallableStatement stmt = con.prepareCall(sql)) {
             stmt.setInt(1, storageId);
             stmt.executeUpdate();
 
@@ -622,4 +600,37 @@ public class User {
             e.printStackTrace();
         }
     }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public void setEmail(String email) {
+        this.email = email;
+    }
+
+    public String getDepartment() {
+        return department;
+    }
+
+    public void setDepartment(String department) {
+        this.department = department;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
 }
+
