@@ -1,5 +1,3 @@
-package DBD_env_unification;
-
 import java.sql.*;
 import java.util.ArrayList;
 import java.util.List;
@@ -7,6 +5,7 @@ import java.util.Scanner;
 import java.sql.Date;
 import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
+
 
 public class User {
     private String user_id;
@@ -18,20 +17,32 @@ public class User {
     private List<Integer> overdueIds = new ArrayList<Integer>();    // 연체 자료 list
     private Connection con;
 
+
     public User(String user_id, Connection con){
         this.con = con;
         String query =
                 "select User_ID, NAME, Mail, Department, Status from user where User_ID = ?";
         try (PreparedStatement preparedStatement = con.prepareStatement(query))
         {
-            preparedStatement.setString(1, user_id);
-            ResultSet rs = preparedStatement.executeQuery();
-            while (rs.next()) {
-                this.user_id = rs.getString("User_ID");
-                name = rs.getString("NAME");
-                email = rs.getString("Mail");
-                department = rs.getString("Department");
-                status = rs.getString("Status");
+            boolean userFound = false;
+            while (!userFound) {
+                preparedStatement.setString(1, user_id);  // user_id로 쿼리 실행
+                ResultSet rs = preparedStatement.executeQuery();
+
+                if (rs.next()) {
+                    // 결과가 있으면 데이터를 설정하고 반복 종료
+                    this.user_id = rs.getString("User_ID");
+                    name = rs.getString("NAME");
+                    email = rs.getString("Mail");
+                    department = rs.getString("Department");
+                    status = rs.getString("Status");
+                    userFound = true;  // 사용자 정보를 찾았으므로 반복 종료
+                } else {
+                    // 결과가 없으면 사용자에게 새로운 ID를 입력받음
+                    Scanner scanner = new Scanner(System.in);
+                    System.out.print("사용자 id 입력 (ex: 20230840) : ");
+                    user_id = scanner.nextLine();  // 새로 입력받은 user_id로 쿼리 실행
+                }
             }
         } catch (SQLException e) {
             System.out.println("Failed to select : " + e.getMessage());
@@ -245,7 +256,9 @@ public class User {
 
         try {
             // 사용자 ID와 비밀번호 확인
+
             if (!isUserCredentialsValid(conn, user_id, password)) {
+
                 System.out.println("잘못된 사용자 ID 또는 비밀번호입니다.");
                 return;
             }
@@ -268,7 +281,8 @@ public class User {
         }
     }
 
-    // 대출 현황 리스트 만들기
+  
+  // 대출 현황 리스트 만들기
     public void initLoanList(Connection con) {
         // 대출 중인 도서의 Loan_ID를 조회하기 위한 쿼리
         String checkLoanQuery = "SELECT Loan_ID FROM loan WHERE User_ID = ? ";
@@ -347,6 +361,7 @@ public class User {
                 System.out.println("Failed to select : " + e.getMessage());
             }
         }
+
     }
 
 
@@ -574,7 +589,7 @@ public class User {
 
         return storageItems;
     }
-
+    //개인 보관함에서 삭제
     public void deleteStorage(int storageId) {
         String sql = "DELETE FROM storage WHERE Storage_ID = ?"; // MySQL 함수 호출 구문
         try (CallableStatement stmt = con.prepareCall(sql)) {
@@ -618,3 +633,4 @@ public class User {
         this.status = status;
     }
 }
+
